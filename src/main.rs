@@ -1,9 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use PS5FileDump::gui::launch_gui;
-use PS5FileDump::library::scan_library_folder;
-use PS5FileDump::orchestrator::{execute_cli_command, CliCommand};
-use PS5FileDump::queue_engine::JobPriority;
+use ps5_file_dump::gui::launch_gui;
+use ps5_file_dump::library::scan_library_folder;
+use ps5_file_dump::orchestrator::{execute_cli_command, CliCommand};
+use ps5_file_dump::queue_engine::JobPriority;
 use std::io;
 use std::path::PathBuf;
 
@@ -25,7 +25,7 @@ fn main() -> io::Result<()> {
             let console_fw = args.next();
             let summary = scan_library_folder(&root, console_fw.as_deref())?;
             println!(
-                "PS5FileDump Library: {} items | Ready: {} | Warning: {} | Blocked: {} | Bytes: {}",
+                "ps5_file_dump Library: {} items | Ready: {} | Warning: {} | Blocked: {} | Bytes: {}",
                 summary.items.len(),
                 summary.ready_count,
                 summary.warning_count,
