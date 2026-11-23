@@ -1,8 +1,12 @@
 [package]
-name = "PS5FileDump"
+name = "ps5_file_dump"
 version = "2.2.1"
 edition = "2021"
 license = "GPL-3.0"
+
+[[bin]]
+name = "PS5FileDump"
+path = "src/main.rs"
 description = "PS5FileDump - Windows Native GUI & CLI PS5 Dump Analyzer, Stream Converter, Asset Packer, Dump Editor, Library & PS5/NAS Suite"
 
 [dependencies]
