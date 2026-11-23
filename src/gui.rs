@@ -111,7 +111,7 @@ impl Default for PS5FileDumpApp {
             auto_output_name: true,
             full_verification: false,
             delete_source: false,
-            target_format: StreamFormat::Pkg,
+            target_format: StreamFormat::Zip,
             compression_profile: CompressionProfile::Fast,
             ffpfsc_level: 6,
             stream_buffer_mb: 2.0,
@@ -245,12 +245,7 @@ impl PS5FileDumpApp {
         match fmt {
             StreamFormat::Folder => parent.join(format!("{stem}_out")).display().to_string(),
             StreamFormat::Zip => parent.join(format!("{stem}.zip")).display().to_string(),
-            StreamFormat::Pkg => parent.join(format!("{stem}.pkg")).display().to_string(),
-            StreamFormat::ExFat => parent.join(format!("{stem}.exfat")).display().to_string(),
-            StreamFormat::Ffpkg => parent.join(format!("{stem}.ffpkg")).display().to_string(),
-            StreamFormat::Ffpfs => parent.join(format!("{stem}.ffpfs")).display().to_string(),
-            StreamFormat::Ffpfsc => parent.join(format!("{stem}.ffpfsc")).display().to_string(),
-            _ => parent.join(format!("{stem}.bin")).display().to_string(),
+            _ => parent.join(format!("{stem}.zip")).display().to_string(),
         }
     }
 
@@ -468,12 +463,10 @@ impl PS5FileDumpApp {
 
                             ui.horizontal_wrapped(|ui| {
                                 format_badge(ui, "Folder", egui::Color32::from_rgb(96, 165, 250));
-                                format_badge(ui, "exfat", egui::Color32::from_rgb(192, 132, 252));
-                                format_badge(ui, "ffpkg", egui::Color32::from_rgb(129, 140, 248));
-                                format_badge(ui, "ffpfs", egui::Color32::from_rgb(56, 189, 248));
-                                format_badge(ui, "ffpfsc", egui::Color32::from_rgb(251, 146, 60));
-                                format_badge(ui, "fpkg", egui::Color32::from_rgb(74, 222, 128));
                                 format_badge(ui, "zip", egui::Color32::from_rgb(250, 204, 21));
+                                format_badge(ui, "gz", egui::Color32::from_rgb(56, 189, 248));
+                                format_badge(ui, "exfat", egui::Color32::from_rgb(192, 132, 252));
+                                format_badge(ui, "fpkg", egui::Color32::from_rgb(74, 222, 128));
                                 format_badge(ui, "7z", egui::Color32::from_rgb(148, 163, 184));
                                 format_badge(ui, "rar", egui::Color32::from_rgb(248, 113, 113));
                             });
@@ -654,11 +647,7 @@ impl PS5FileDumpApp {
                     ui.horizontal_wrapped(|ui| {
                         for (fmt, lbl) in [
                             (StreamFormat::Folder, "Folder"),
-                            (StreamFormat::Pkg, "fpkg"),
-                            (StreamFormat::ExFat, "exfat"),
-                            (StreamFormat::Ffpkg, "ffpkg"),
-                            (StreamFormat::Ffpfsc, "ffpfsc"),
-                            (StreamFormat::Ffpfs, "ffpfs"),
+                            (StreamFormat::Zip, "zip"),
                         ] {
                             if ui.selectable_value(&mut self.target_format, fmt, lbl).clicked() {
                                 format_changed = true;
@@ -668,21 +657,17 @@ impl PS5FileDumpApp {
 
                     ui.add_space(6.0);
                     let (hint_col, hint_txt) = match self.target_format {
-                        StreamFormat::Pkg => (
+                        StreamFormat::Zip => (
                             egui::Color32::from_rgb(74, 222, 128),
-                            "Recommended. Runs like a native game, but only if your firmware allows it.",
-                        ),
-                        StreamFormat::Ffpfsc => (
-                            egui::Color32::from_rgb(251, 146, 60),
-                            "Compressed stream container with tunable compression level.",
+                            "Standard compressed ZIP archive with atomic .part write and size check.",
                         ),
                         StreamFormat::Folder => (
                             egui::Color32::from_rgb(96, 165, 250),
-                            "Extracted game directory ready for direct inspection or editing.",
+                            "Clean extracted or copied game directory preserving dump structure.",
                         ),
                         _ => (
                             egui::Color32::from_rgb(148, 163, 184),
-                            "Stream container with atomic .part write and size verification.",
+                            "Select Folder or zip for supported conversion.",
                         ),
                     };
                     ui.colored_label(hint_col, hint_txt);
@@ -724,7 +709,7 @@ impl PS5FileDumpApp {
                     ui.add_space(4.0);
                     ui.colored_label(
                         egui::Color32::from_rgb(74, 222, 128),
-                        "Recommended. The quickest build.",
+                        "Fast provides quick archiving; Balanced or Smallest reduces size further.",
                     );
 
                     ui.add_space(12.0);
@@ -732,7 +717,7 @@ impl PS5FileDumpApp {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.strong("Full verification");
-                                ui.weak("Re-reads every byte to check the output. Takes longer.");
+                                ui.weak("Checks verified output integrity before finishing.");
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -748,7 +733,7 @@ impl PS5FileDumpApp {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.strong("Delete the source");
-                                ui.weak("No undo. The source is deleted only after a successful conversion.");
+                                ui.weak("No undo. Removes source only after verified completion.");
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1272,21 +1257,16 @@ impl PS5FileDumpApp {
             ui.heading("About & Format Comparison");
             ui.add_space(8.0);
             ui.strong("PS5FileDump (Windows Native Release)");
-            ui.weak("Stream converter, pre-flight compatibility analyzer & auto-remediation tool for PS5 dumps.");
+            ui.weak("Dump pre-flight checker, auto-remediation helper, Zstd/LZ4 asset packer & real Folder/ZIP converter.");
             ui.add_space(10.0);
             sub_card().show(ui, |ui| {
-                ui.strong("fpkg (.pkg)");
-                ui.weak("Native PS5 package workflow; requires compatible firmware.");
+                ui.strong("ZIP (.zip)");
+                ui.weak("Standard compressed archive with atomic .part write and byte-count verification.");
             });
             ui.add_space(6.0);
             sub_card().show(ui, |ui| {
-                ui.strong("ffpkg / ffpfs / ffpfsc");
-                ui.weak("Stream containers with atomic .part write, optional compression, and size verification.");
-            });
-            ui.add_space(6.0);
-            sub_card().show(ui, |ui| {
-                ui.strong("exfat / Folder");
-                ui.weak("Direct dump image or extracted folder structure for editing and asset packing.");
+                ui.strong("Folder");
+                ui.weak("Direct directory copy/extraction preserving param.json, eboot.bin, sce_sys, and fakelib.");
             });
         });
     }
