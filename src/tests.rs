@@ -42,7 +42,7 @@ fn detects_pkg_header_even_without_extension() {
     f.write_all(b"FPKG\x00\x01\x02\x03rest_of_header").unwrap();
 
     let report = run_preflight_analysis(&file_path, None, None).unwrap();
-    assert_eq!(report.detected_label, "PS5 FPKG (.pkg)");
+    assert_eq!(report.detected_label, "fpkg");
     assert_eq!(report.status, ReadinessStatus::Warning);
     assert!(report.findings.iter().any(|f| f.code == "NO_FILE_EXTENSION"));
 
@@ -77,7 +77,7 @@ fn packs_folder_to_real_zip_inspects_zip_and_extracts_back() {
     assert_eq!(res.files_processed, 3);
 
     let zip_report = run_preflight_analysis(&zip_out, Some("8.00"), None).unwrap();
-    assert_eq!(zip_report.detected_label, "ZIP Archive");
+    assert_eq!(zip_report.detected_label, "zip");
     assert_eq!(zip_report.status, ReadinessStatus::Ready);
     assert!(zip_report.metadata.eboot_valid_elf64);
 
