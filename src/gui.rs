@@ -9,7 +9,7 @@ use crate::net::{
     send_elf_payload, ConnectManager, EndpointHealth, NetworkEndpoint, RemoteProtocol,
 };
 use crate::packer::{pack_game_assets, unpack_game_assets, AssetCodec, PackStats};
-use crate::queue_engine::{JobPriority, StreamQueueEngine, TransferJob};
+use crate::queue_engine::{JobPriority, StreamQueueEngine};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -144,7 +144,7 @@ fn apply_forge_dark_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(13.0, 7.0);
-    style.spacing.window_margin = egui::Margin::same(14);
+    style.spacing.window_margin = egui::Margin::same(14.0);
 
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(14, 14, 21);
@@ -191,7 +191,8 @@ impl PS5FileDumpApp {
         self.analyzer_error = None;
         let path = PathBuf::from(self.target_input.trim());
         if path.as_os_str().is_empty() {
-            self.analyzer_error = Some("Select a source file (any extension) or game folder first.".into());
+            self.analyzer_error =
+                Some("Select a source file (any extension) or game folder first.".into());
             return;
         }
         let fw = (!self.console_fw.trim().is_empty()).then_some(self.console_fw.trim());
@@ -294,8 +295,11 @@ impl eframe::App for PS5FileDumpApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.weak(format!(
-                    "PS5: {}:{}  |  Buffer: {:.2} MB  |  Windows Release Build",
-                    self.ps5_ip_input, self.ps5_port_input, self.stream_buffer_mb
+                    "PS5: {}:{}  |  Buffer: {:.2} MB  |  Priority: {:?}  |  Windows Release Build",
+                    self.ps5_ip_input,
+                    self.ps5_port_input,
+                    self.stream_buffer_mb,
+                    self.stream_priority
                 ));
             });
             ui.add_space(4.0);
@@ -319,6 +323,7 @@ impl eframe::App for PS5FileDumpApp {
 impl PS5FileDumpApp {
     fn ui_convert_and_inspect(&mut self, ui: &mut egui::Ui) {
         let card_bg = egui::Color32::from_rgb(23, 23, 31);
+        let mut should_analyze = false;
 
         card_frame(card_bg).show(ui, |ui| {
             ui.heading("Source Selection & PS5 Pre-Flight Compatibility Check");
@@ -331,17 +336,17 @@ impl PS5FileDumpApp {
                 if ui.button("Pick File...").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_file() {
                         self.target_input = p.display().to_string();
-                        self.run_analysis();
+                        should_analyze = true;
                     }
                 }
                 if ui.button("Pick Folder...").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.target_input = p.display().to_string();
-                        self.run_analysis();
+                        should_analyze = true;
                     }
                 }
                 if ui.button("Inspect").clicked() {
-                    self.run_analysis();
+                    should_analyze = true;
                 }
             });
 
@@ -351,26 +356,58 @@ impl PS5FileDumpApp {
             }
         });
 
+        if should_analyze {
+            self.run_analysis();
+        }
+
         if let Some(rep) = &self.last_report {
             ui.add_space(10.0);
             bordered_card_frame(card_bg, egui::Color32::from_rgb(255, 122, 47)).show(ui, |ui| {
                 let (badge_label, color) = match rep.status {
-                    ReadinessStatus::Ready => ("✓ READY FOR PS5", egui::Color32::from_rgb(47, 210, 122)),
-                    ReadinessStatus::Warning => ("⚠ WARNING — REVIEW NOTES", egui::Color32::from_rgb(255, 181, 71)),
-                    ReadinessStatus::Blocked => ("✕ BLOCKED — FIX BEFORE RUN", egui::Color32::from_rgb(255, 107, 107)),
+                    ReadinessStatus::Ready => {
+                        ("✓ READY FOR PS5", egui::Color32::from_rgb(47, 210, 122))
+                    }
+                    ReadinessStatus::Warning => (
+                        "⚠ WARNING — REVIEW NOTES",
+                        egui::Color32::from_rgb(255, 181, 71),
+                    ),
+                    ReadinessStatus::Blocked => (
+                        "✕ BLOCKED — FIX BEFORE RUN",
+                        egui::Color32::from_rgb(255, 107, 107),
+                    ),
                 };
 
                 ui.horizontal(|ui| {
-                    ui.heading(rep.metadata.title.as_deref().unwrap_or("Detected Game / Package"));
-                    ui.colored_label(color, egui::RichText::new(badge_label).strong().size(15.0));
+                    ui.heading(
+                        rep.metadata
+                            .title
+                            .as_deref()
+                            .unwrap_or("Detected Game / Package"),
+                    );
+                    ui.colored_label(
+                        color,
+                        egui::RichText::new(badge_label).strong().size(15.0),
+                    );
                 });
 
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
                     let tiles = [
                         ("FORMAT", rep.detected_label.clone()),
-                        ("TITLE ID", rep.metadata.title_id.clone().unwrap_or_else(|| "N/A".into())),
-                        ("REQ FW", rep.metadata.required_fw.clone().unwrap_or_else(|| "Unknown".into())),
+                        (
+                            "TITLE ID",
+                            rep.metadata
+                                .title_id
+                                .clone()
+                                .unwrap_or_else(|| "N/A".into()),
+                        ),
+                        (
+                            "REQ FW",
+                            rep.metadata
+                                .required_fw
+                                .clone()
+                                .unwrap_or_else(|| "Unknown".into()),
+                        ),
                         (
                             "EBOOT ELF64",
                             if rep.metadata.eboot_valid_elf64 {
@@ -381,7 +418,11 @@ impl PS5FileDumpApp {
                         ),
                         (
                             "SIZE",
-                            format!("{:.2} MB ({} files)", rep.metadata.total_bytes as f64 / (1024.0 * 1024.0), rep.metadata.total_files),
+                            format!(
+                                "{:.2} MB ({} files)",
+                                rep.metadata.total_bytes as f64 / (1024.0 * 1024.0),
+                                rep.metadata.total_files
+                            ),
                         ),
                     ];
                     for (lbl, val) in tiles {
@@ -411,7 +452,10 @@ impl PS5FileDumpApp {
                             ReadinessStatus::Blocked => egui::Color32::from_rgb(255, 107, 107),
                         };
                         tile_frame().show(ui, |ui| {
-                            ui.colored_label(c, format!("[{:?}] {} — {}", f.severity, f.code, f.message));
+                            ui.colored_label(
+                                c,
+                                format!("[{:?}] {} — {}", f.severity, f.code, f.message),
+                            );
                             ui.weak(format!("Action: {}", f.remediation));
                         });
                     }
@@ -420,6 +464,8 @@ impl PS5FileDumpApp {
         }
 
         ui.add_space(10.0);
+        let mut should_convert = false;
+
         card_frame(card_bg).show(ui, |ui| {
             ui.heading("Target Format & Stream Conversion");
             ui.add_space(6.0);
@@ -437,15 +483,38 @@ impl PS5FileDumpApp {
 
             ui.horizontal(|ui| {
                 ui.label("Profile:");
-                ui.selectable_value(&mut self.compression_profile, CompressionProfile::Fast, "Fast");
-                ui.selectable_value(&mut self.compression_profile, CompressionProfile::Balanced, "Balanced");
-                ui.selectable_value(&mut self.compression_profile, CompressionProfile::Smallest, "Smallest");
-                ui.selectable_value(&mut self.compression_profile, CompressionProfile::Stored, "Stored");
+                ui.selectable_value(
+                    &mut self.compression_profile,
+                    CompressionProfile::Fast,
+                    "Fast",
+                );
+                ui.selectable_value(
+                    &mut self.compression_profile,
+                    CompressionProfile::Balanced,
+                    "Balanced",
+                );
+                ui.selectable_value(
+                    &mut self.compression_profile,
+                    CompressionProfile::Smallest,
+                    "Smallest",
+                );
+                ui.selectable_value(
+                    &mut self.compression_profile,
+                    CompressionProfile::Stored,
+                    "Stored",
+                );
                 if self.target_format == StreamFormat::Ffpfsc {
                     ui.separator();
                     ui.label("FFPFSC Level:");
                     ui.add(egui::Slider::new(&mut self.ffpfsc_level, 0..=9));
                 }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Queue Priority:");
+                ui.selectable_value(&mut self.stream_priority, JobPriority::High, "High");
+                ui.selectable_value(&mut self.stream_priority, JobPriority::Normal, "Normal");
+                ui.selectable_value(&mut self.stream_priority, JobPriority::Low, "Low");
             });
 
             ui.horizontal(|ui| {
@@ -468,7 +537,7 @@ impl PS5FileDumpApp {
                 ui.label("Stream Buffer (MB):");
                 ui.add(egui::Slider::new(&mut self.stream_buffer_mb, 0.25..=16.0));
                 if ui.button("Start Convert Stream").clicked() {
-                    self.start_conversion();
+                    should_convert = true;
                 }
             });
 
@@ -499,14 +568,29 @@ impl PS5FileDumpApp {
                 }
                 ConversionTaskState::Failed(err) => {
                     ui.add_space(6.0);
-                    ui.colored_label(egui::Color32::from_rgb(255, 107, 107), format!("✕ Failed: {err}"));
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 107, 107),
+                        format!("✕ Failed: {err}"),
+                    );
                 }
             }
         });
+
+        if should_convert {
+            self.next_job_id += 1;
+            self.start_conversion();
+        }
     }
 
     fn ui_edit(&mut self, ui: &mut egui::Ui) {
         let card_bg = egui::Color32::from_rgb(23, 23, 31);
+        let mut staged_rename: Option<(String, String)> = None;
+        let mut staged_add: Option<(PathBuf, String)> = None;
+        let mut staged_delete: Option<String> = None;
+        let mut do_undo = false;
+        let mut do_discard = false;
+        let mut do_apply = false;
+        let mut do_reload = false;
 
         card_frame(card_bg).show(ui, |ui| {
             ui.heading("Game Dump File Editor (Staged Changes + Undo + Apply)");
@@ -515,30 +599,37 @@ impl PS5FileDumpApp {
 
             ui.horizontal(|ui| {
                 ui.label("Dump Folder:");
-                ui.add(egui::TextEdit::singleline(&mut self.editor_dir_input).desired_width(420.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.editor_dir_input).desired_width(420.0),
+                );
                 if ui.button("Open Folder...").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.editor_dir_input = p.display().to_string();
-                        let _ = self.editor.load_folder(&p);
+                        do_reload = true;
                     }
                 }
                 if ui.button("Reload").clicked() {
-                    let p = PathBuf::from(self.editor_dir_input.trim());
-                    let _ = self.editor.load_folder(&p);
+                    do_reload = true;
                 }
             });
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Rename From:");
-                ui.add(egui::TextEdit::singleline(&mut self.editor_rename_from).desired_width(170.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.editor_rename_from)
+                        .desired_width(170.0),
+                );
                 ui.label("To:");
-                ui.add(egui::TextEdit::singleline(&mut self.editor_rename_to).desired_width(170.0));
-                if ui.button("Stage Rename").clicked() && !self.editor_rename_from.trim().is_empty() {
-                    self.editor.stage_op(EditOperation::Rename {
-                        from_rel: self.editor_rename_from.trim().to_string(),
-                        to_rel: self.editor_rename_to.trim().to_string(),
-                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.editor_rename_to).desired_width(170.0),
+                );
+                if ui.button("Stage Rename").clicked() && !self.editor_rename_from.trim().is_empty()
+                {
+                    staged_rename = Some((
+                        self.editor_rename_from.trim().to_string(),
+                        self.editor_rename_to.trim().to_string(),
+                    ));
                     self.editor_rename_from.clear();
                     self.editor_rename_to.clear();
                 }
@@ -549,28 +640,25 @@ impl PS5FileDumpApp {
                             .and_then(|s| s.to_str())
                             .unwrap_or("added_file.bin")
                             .to_string();
-                        self.editor.stage_op(EditOperation::AddOrReplace {
-                            src_file: src_f,
-                            target_rel: name,
-                        });
+                        staged_add = Some((src_f, name));
                     }
                 }
             });
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.strong(format!("Staged Changes: {}", self.editor.pending_ops.len()));
+                ui.strong(format!(
+                    "Staged Changes: {}",
+                    self.editor.pending_ops.len()
+                ));
                 if ui.button("Undo Last").clicked() {
-                    self.editor.undo_last();
+                    do_undo = true;
                 }
                 if ui.button("Discard All").clicked() {
-                    self.editor.discard_all();
+                    do_discard = true;
                 }
                 if ui.button("Apply Changes").clicked() {
-                    match self.editor.apply_changes() {
-                        Ok(n) => self.editor_status = Some(format!("Applied {n} change(s) successfully.")),
-                        Err(e) => self.editor_status = Some(format!("Error: {e}")),
-                    }
+                    do_apply = true;
                 }
             });
 
@@ -587,9 +675,7 @@ impl PS5FileDumpApp {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Stage Delete").clicked() {
-                            self.editor.stage_op(EditOperation::Delete {
-                                rel_path: entry.rel_path.clone(),
-                            });
+                            staged_delete = Some(entry.rel_path.clone());
                         }
                         if ui.small_button("Select").clicked() {
                             self.editor_rename_from = entry.rel_path.clone();
@@ -599,15 +685,53 @@ impl PS5FileDumpApp {
                 });
             }
         });
+
+        if do_reload {
+            let p = PathBuf::from(self.editor_dir_input.trim());
+            let _ = self.editor.load_folder(&p);
+        }
+        if let Some((from_rel, to_rel)) = staged_rename {
+            self.editor
+                .stage_op(EditOperation::Rename { from_rel, to_rel });
+        }
+        if let Some((src_file, target_rel)) = staged_add {
+            self.editor.stage_op(EditOperation::AddOrReplace {
+                src_file,
+                target_rel,
+            });
+        }
+        if let Some(rel_path) = staged_delete {
+            self.editor.stage_op(EditOperation::Delete { rel_path });
+        }
+        if do_undo {
+            self.editor.undo_last();
+        }
+        if do_discard {
+            self.editor.discard_all();
+        }
+        if do_apply {
+            match self.editor.apply_changes() {
+                Ok(n) => {
+                    self.editor_status = Some(format!("Applied {n} change(s) successfully."))
+                }
+                Err(e) => self.editor_status = Some(format!("Error: {e}")),
+            }
+        }
     }
 
     fn ui_pack(&mut self, ui: &mut egui::Ui) {
         let card_bg = egui::Color32::from_rgb(23, 23, 31);
+        let mut do_pack = false;
+        let mut do_unpack = false;
 
         card_frame(card_bg).show(ui, |ui| {
             ui.colored_label(
                 egui::Color32::from_rgb(255, 216, 77),
-                egui::RichText::new("Asset Packer & Unpacker (Zstd / LZ4 + 8-byte aligned ampr_emu.index)").strong().size(16.0),
+                egui::RichText::new(
+                    "Asset Packer & Unpacker (Zstd / LZ4 + 8-byte aligned ampr_emu.index)",
+                )
+                .strong()
+                .size(16.0),
             );
             ui.weak("Compresses game assets into Zstd or LZ4 packs for runtime loading on PS5 via fakelib/libSceAmpr.sprx.");
             ui.add_space(8.0);
@@ -646,23 +770,10 @@ impl PS5FileDumpApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.button("Pack Assets").clicked() {
-                    let src = PathBuf::from(self.pack_src_input.trim());
-                    let dst = PathBuf::from(self.pack_out_input.trim());
-                    match pack_game_assets(&src, &dst, self.pack_codec, self.pack_zstd_level) {
-                        Ok(stats) => {
-                            self.pack_status = Some("Assets packed successfully.".into());
-                            self.pack_result = Some(stats);
-                        }
-                        Err(e) => self.pack_status = Some(format!("Pack failed: {e}")),
-                    }
+                    do_pack = true;
                 }
                 if ui.button("Unpack Assets").clicked() {
-                    let src = PathBuf::from(self.pack_src_input.trim());
-                    let dst = PathBuf::from(self.pack_out_input.trim());
-                    match unpack_game_assets(&src, &dst) {
-                        Ok(n) => self.pack_status = Some(format!("Unpacked {n} compressed asset(s) to original format.")),
-                        Err(e) => self.pack_status = Some(format!("Unpack failed: {e}")),
-                    }
+                    do_unpack = true;
                 }
             });
 
@@ -685,31 +796,62 @@ impl PS5FileDumpApp {
                 }
             }
         });
+
+        if do_pack {
+            let src = PathBuf::from(self.pack_src_input.trim());
+            let dst = PathBuf::from(self.pack_out_input.trim());
+            match pack_game_assets(&src, &dst, self.pack_codec, self.pack_zstd_level) {
+                Ok(stats) => {
+                    self.pack_status = Some("Assets packed successfully.".into());
+                    self.pack_result = Some(stats);
+                }
+                Err(e) => self.pack_status = Some(format!("Pack failed: {e}")),
+            }
+        }
+        if do_unpack {
+            let src = PathBuf::from(self.pack_src_input.trim());
+            let dst = PathBuf::from(self.pack_out_input.trim());
+            match unpack_game_assets(&src, &dst) {
+                Ok(n) => {
+                    self.pack_status = Some(format!(
+                        "Unpacked {n} compressed asset(s) to original format."
+                    ))
+                }
+                Err(e) => self.pack_status = Some(format!("Unpack failed: {e}")),
+            }
+        }
     }
 
     fn ui_storage(&mut self, ui: &mut egui::Ui) {
         let card_bg = egui::Color32::from_rgb(23, 23, 31);
+        let mut should_scan = false;
+        let mut open_in_editor: Option<PathBuf> = None;
+        let mut open_in_convert: Option<PathBuf> = None;
 
         card_frame(card_bg).show(ui, |ui| {
             ui.heading("Storage & Game Library Manager");
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Library Folder:");
-                ui.add(egui::TextEdit::singleline(&mut self.library_dir_input).desired_width(400.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.library_dir_input).desired_width(400.0),
+                );
                 if ui.button("Select Folder...").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.library_dir_input = p.display().to_string();
-                        self.run_library_scan();
+                        should_scan = true;
                     }
                 }
                 if ui.button("Scan Library").clicked() {
-                    self.run_library_scan();
+                    should_scan = true;
                 }
             });
 
             ui.horizontal(|ui| {
                 ui.label("Search Filter:");
-                ui.add(egui::TextEdit::singleline(&mut self.library_filter).desired_width(240.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.library_filter).desired_width(240.0),
+                );
             });
 
             if let Some(err) = &self.library_error {
@@ -717,14 +859,27 @@ impl PS5FileDumpApp {
             }
         });
 
+        if should_scan {
+            self.run_library_scan();
+        }
+
         if let Some(sum) = &self.library_summary {
             ui.add_space(10.0);
             card_frame(card_bg).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong(format!("Total: {}", sum.items.len()));
-                    ui.colored_label(egui::Color32::from_rgb(47, 210, 122), format!("Ready: {}", sum.ready_count));
-                    ui.colored_label(egui::Color32::from_rgb(255, 181, 71), format!("Warning: {}", sum.warning_count));
-                    ui.colored_label(egui::Color32::from_rgb(255, 107, 107), format!("Blocked: {}", sum.blocked_count));
+                    ui.colored_label(
+                        egui::Color32::from_rgb(47, 210, 122),
+                        format!("Ready: {}", sum.ready_count),
+                    );
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 181, 71),
+                        format!("Warning: {}", sum.warning_count),
+                    );
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 107, 107),
+                        format!("Blocked: {}", sum.blocked_count),
+                    );
                     ui.label(format!(
                         "Total Size: {:.2} GB",
                         sum.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
@@ -737,7 +892,13 @@ impl PS5FileDumpApp {
                     if q.is_empty() {
                         return true;
                     }
-                    let title = it.report.metadata.title.as_deref().unwrap_or("").to_ascii_lowercase();
+                    let title = it
+                        .report
+                        .metadata
+                        .title
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
                     let path_s = it.path.display().to_string().to_ascii_lowercase();
                     title.contains(&q) || path_s.contains(&q)
                 }) {
@@ -749,18 +910,20 @@ impl PS5FileDumpApp {
                     tile_frame().show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.colored_label(c, format!("[{:?}]", item.report.status));
-                            ui.strong(item.report.metadata.title.as_deref().unwrap_or("Unnamed"));
+                            ui.strong(
+                                item.report
+                                    .metadata
+                                    .title
+                                    .as_deref()
+                                    .unwrap_or("Unnamed"),
+                            );
                             ui.label(format!("({})", item.report.detected_label));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if item.path.is_dir() && ui.small_button("Edit").clicked() {
-                                    self.editor_dir_input = item.path.display().to_string();
-                                    let _ = self.editor.load_folder(&item.path);
-                                    self.tab = ActiveTab::Edit;
+                                    open_in_editor = Some(item.path.clone());
                                 }
                                 if ui.small_button("Convert").clicked() {
-                                    self.target_input = item.path.display().to_string();
-                                    self.run_analysis();
-                                    self.tab = ActiveTab::Convert;
+                                    open_in_convert = Some(item.path.clone());
                                 }
                             });
                         });
@@ -770,10 +933,24 @@ impl PS5FileDumpApp {
                 }
             });
         }
+
+        if let Some(p) = open_in_editor {
+            self.editor_dir_input = p.display().to_string();
+            let _ = self.editor.load_folder(&p);
+            self.tab = ActiveTab::Edit;
+        }
+        if let Some(p) = open_in_convert {
+            self.target_input = p.display().to_string();
+            self.run_analysis();
+            self.tab = ActiveTab::Convert;
+        }
     }
 
     fn ui_connect(&mut self, ui: &mut egui::Ui) {
         let card_bg = egui::Color32::from_rgb(23, 23, 31);
+        let mut do_send_elf = false;
+        let mut do_add_endpoint = false;
+        let mut do_probe_all = false;
 
         card_frame(card_bg).show(ui, |ui| {
             ui.heading("PS5 ELF Payload Sender (Port 9021)");
@@ -788,17 +965,15 @@ impl PS5FileDumpApp {
                 ui.label("Payload:");
                 ui.add(egui::TextEdit::singleline(&mut self.elf_file_input).desired_width(360.0));
                 if ui.button("Select .elf...").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("ELF", &["elf", "bin"]).pick_file() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("ELF", &["elf", "bin"])
+                        .pick_file()
+                    {
                         self.elf_file_input = p.display().to_string();
                     }
                 }
                 if ui.button("Send to PS5").clicked() {
-                    let p = PathBuf::from(self.elf_file_input.trim());
-                    let port: u16 = self.ps5_port_input.trim().parse().unwrap_or(9021);
-                    match send_elf_payload(&p, self.ps5_ip_input.trim(), port) {
-                        Ok(()) => self.net_status_msg = Some("Payload sent successfully to PS5.".into()),
-                        Err(e) => self.net_status_msg = Some(format!("Failed: {e}")),
-                    }
+                    do_send_elf = true;
                 }
             });
         });
@@ -821,23 +996,13 @@ impl PS5FileDumpApp {
                 ui.label("Share:");
                 ui.add(egui::TextEdit::singleline(&mut self.new_ep_path).desired_width(100.0));
                 if ui.button("Add").clicked() && !self.new_ep_name.trim().is_empty() {
-                    let id = format!("ep-{}", self.new_ep_name.trim().to_lowercase());
-                    let port = self.new_ep_port.trim().parse().ok();
-                    self.connect_mgr.add_or_update(NetworkEndpoint::new(
-                        id,
-                        self.new_ep_name.trim(),
-                        self.new_ep_proto,
-                        self.new_ep_host.trim(),
-                        port,
-                        self.new_ep_path.trim(),
-                    ));
-                    self.new_ep_name.clear();
+                    do_add_endpoint = true;
                 }
             });
 
             ui.add_space(6.0);
             if ui.button("Check All Connections").clicked() {
-                self.health_results = self.connect_mgr.check_all(400);
+                do_probe_all = true;
             }
 
             if let Some(msg) = &self.net_status_msg {
@@ -850,19 +1015,55 @@ impl PS5FileDumpApp {
                 tile_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.strong(&ep.name);
-                        ui.label(format!("[{:?}] {}:{} ({})", ep.protocol, ep.host, ep.port, ep.share_or_path));
+                        ui.label(format!(
+                            "[{:?}] {}:{} ({})",
+                            ep.protocol, ep.host, ep.port, ep.share_or_path
+                        ));
                         match health {
                             EndpointHealth::Online { latency_ms } => {
-                                ui.colored_label(egui::Color32::from_rgb(47, 210, 122), format!("ONLINE ({latency_ms} ms)"));
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(47, 210, 122),
+                                    format!("ONLINE ({latency_ms} ms)"),
+                                );
                             }
                             EndpointHealth::Offline { reason } => {
-                                ui.colored_label(egui::Color32::from_rgb(255, 107, 107), format!("OFFLINE: {reason}"));
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 107, 107),
+                                    format!("OFFLINE: {reason}"),
+                                );
                             }
                         }
                     });
                 });
             }
         });
+
+        if do_send_elf {
+            let p = PathBuf::from(self.elf_file_input.trim());
+            let port: u16 = self.ps5_port_input.trim().parse().unwrap_or(9021);
+            match send_elf_payload(&p, self.ps5_ip_input.trim(), port) {
+                Ok(()) => {
+                    self.net_status_msg = Some("Payload sent successfully to PS5.".into())
+                }
+                Err(e) => self.net_status_msg = Some(format!("Failed: {e}")),
+            }
+        }
+        if do_add_endpoint {
+            let id = format!("ep-{}", self.new_ep_name.trim().to_lowercase());
+            let port = self.new_ep_port.trim().parse().ok();
+            self.connect_mgr.add_or_update(NetworkEndpoint::new(
+                id,
+                self.new_ep_name.trim(),
+                self.new_ep_proto,
+                self.new_ep_host.trim(),
+                port,
+                self.new_ep_path.trim(),
+            ));
+            self.new_ep_name.clear();
+        }
+        if do_probe_all {
+            self.health_results = self.connect_mgr.check_all(400);
+        }
     }
 }
 
