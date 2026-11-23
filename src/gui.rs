@@ -174,7 +174,7 @@ fn card_frame(fill: egui::Color32) -> egui::Frame {
 fn bordered_card_frame(fill: egui::Color32, stroke_color: egui::Color32) -> egui::Frame {
     egui::Frame::none()
         .fill(fill)
-        .stroke(egui::Stroke::new(1.2, stroke_color))
+        .stroke(egui::Stroke::new(1.2_f32, stroke_color))
         .rounding(egui::Rounding::same(14.0))
         .inner_margin(egui::Margin::same(14.0))
 }
