@@ -30,6 +30,14 @@ pub enum IssueCategory {
     TargetEnvironment,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixActionKind {
+    UseSuggestedRoot,
+    GenerateParamJson,
+    IsolateFakelib,
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub struct DiagnosticFinding {
     pub code: &'static str,
@@ -37,6 +45,8 @@ pub struct DiagnosticFinding {
     pub severity: ReadinessStatus,
     pub message: String,
     pub remediation: String,
+    pub fix_action: FixActionKind,
+    pub fix_target_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,12 +57,14 @@ pub struct GameMetadata {
     pub required_fw: Option<String>,
     pub eboot_valid_elf64: bool,
     pub has_fakelib: bool,
+    pub fakelib_modules: Vec<String>,
     pub has_ampr_runtime: bool,
     pub packed_asset_count: usize,
     pub zero_byte_files: usize,
     pub total_files: usize,
     pub total_bytes: u64,
     pub sha256_hex: Option<String>,
+    pub suggested_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +98,11 @@ impl ParamJson {
             }
         }
         if let Some(loc) = &self.localized {
-            if let Some(en) = loc.get("en-US").and_then(|v| v.get("titleName")).and_then(|v| v.as_str()) {
+            if let Some(en) = loc
+                .get("en-US")
+                .and_then(|v| v.get("titleName"))
+                .and_then(|v| v.as_str())
+            {
                 return Some(en.to_string());
             }
             if let Some(obj) = loc.as_object() {
@@ -125,7 +141,7 @@ pub fn compute_file_sha256(path: &Path) -> io::Result<String> {
 
 pub fn sniff_magic_label(path: &Path) -> io::Result<String> {
     if path.is_dir() {
-        return Ok("Game Folder / Directory".into());
+        return Ok("Folder".into());
     }
     let mut f = File::open(path)?;
     let mut buf = [0u8; 16];
@@ -133,28 +149,135 @@ pub fn sniff_magic_label(path: &Path) -> io::Result<String> {
     let s = &buf[..n];
 
     let label = if s.starts_with(b"PK\x03\x04") || s.starts_with(b"PK\x05\x06") {
-        "ZIP Archive"
+        "zip"
     } else if s.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
-        "7Z Archive"
+        "7z"
     } else if s.starts_with(b"Rar!\x1A\x07") {
-        "RAR Archive"
+        "rar"
     } else if s.starts_with(b"CNT\x00") || s.starts_with(b"FPKG") {
-        "PS5 FPKG (.pkg)"
+        "fpkg"
     } else if s.starts_with(b"FFPKG") {
-        "FFPKG Image"
+        "ffpkg"
     } else if s.starts_with(b"FFPFS") && n >= 6 && s[5] == b'C' {
-        "FFPFSC Compressed Image"
+        "ffpfsc"
     } else if s.starts_with(b"FFPFS") {
-        "FFPFS Image"
+        "ffpfs"
     } else if n >= 11 && &s[3..11] == b"EXFAT   " {
-        "exFAT Dump Image"
+        "exfat"
     } else if n >= 2 && s[0] == 0x1F && s[1] == 0x8B {
-        "GZIP Compressed Stream"
+        "gz"
     } else {
-        "Raw / Custom Extension Binary"
+        "raw"
     };
 
     Ok(label.into())
+}
+
+fn find_nested_dump_root(root: &Path, max_depth: usize) -> Option<PathBuf> {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 0 && (dir.join("param.json").is_file() || dir.join("eboot.bin").is_file()) {
+            return Some(dir);
+        }
+        if depth < max_depth {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if let Ok(ft) = entry.file_type() {
+                        if ft.is_dir() {
+                            stack.push((entry.path(), depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn collect_fakelib_modules(fakelib_dir: &Path) -> Vec<String> {
+    let mut mods = Vec::new();
+    if !fakelib_dir.is_dir() {
+        return mods;
+    }
+    if let Ok(entries) = fs::read_dir(fakelib_dir) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        mods.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    mods.sort();
+    mods
+}
+
+pub fn apply_suggested_fix(finding: &DiagnosticFinding, dump_root: &Path) -> io::Result<String> {
+    match finding.fix_action {
+        FixActionKind::UseSuggestedRoot => {
+            if let Some(ref target) = finding.fix_target_path {
+                Ok(target.display().to_string())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No nested dump root path found.",
+                ))
+            }
+        }
+        FixActionKind::GenerateParamJson => {
+            if !dump_root.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Target folder does not exist.",
+                ));
+            }
+            let folder_name = dump_root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("PPSA00000");
+            let title_id = folder_name
+                .split('_')
+                .find(|part| part.starts_with("PPSA") || part.starts_with("CUSA"))
+                .unwrap_or("PPSA00000");
+            let default_json = serde_json::json!({
+                "title": folder_name,
+                "titleId": title_id,
+                "contentId": format!("UP0000-{title_id}_00-0000000000000000"),
+                "requiredSystemSoftwareVersion": "7.00",
+                "localizedParameters": {
+                    "en-US": {
+                        "titleName": folder_name
+                    }
+                }
+            });
+            let pretty = serde_json::to_string_pretty(&default_json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            let p_path = dump_root.join("param.json");
+            fs::write(&p_path, pretty)?;
+            Ok(format!("Generated param.json at {}", p_path.display()))
+        }
+        FixActionKind::IsolateFakelib => {
+            let src = dump_root.join("fakelib");
+            let dst = dump_root.join("fakelib_disabled");
+            if !src.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "fakelib folder not found.",
+                ));
+            }
+            if dst.exists() {
+                fs::remove_dir_all(&dst)?;
+            }
+            fs::rename(&src, &dst)?;
+            Ok("Moved fakelib/ to fakelib_disabled/ for safe testing.".into())
+        }
+        FixActionKind::None => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "This issue requires manual file replacement or re-dumping.",
+        )),
+    }
 }
 
 fn inspect_zip_contents(
@@ -165,7 +288,7 @@ fn inspect_zip_contents(
 ) -> io::Result<PackageKind> {
     let f = File::open(zip_path)?;
     let mut archive = ZipArchive::new(f)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Corrupt ZIP archive: {e}")))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Corrupt ZIP: {e}")))?;
 
     let mut found_param_raw: Option<String> = None;
     let mut found_eboot_header: Option<Vec<u8>> = None;
@@ -193,13 +316,18 @@ fn inspect_zip_contents(
                 category: IssueCategory::TargetEnvironment,
                 severity: ReadinessStatus::Warning,
                 message: format!("Case-collision inside ZIP: {norm}"),
-                remediation: "Extract on a case-sensitive filesystem or rename duplicate entries.".into(),
+                remediation: "Extract on case-sensitive storage or rename duplicate entries.".into(),
+                fix_action: FixActionKind::None,
+                fix_target_path: None,
             });
         }
 
         let lower = norm.to_ascii_lowercase();
         if lower.contains("/fakelib/") || lower.starts_with("fakelib/") {
             meta.has_fakelib = true;
+            if let Some(m) = norm.split('/').next_back() {
+                meta.fakelib_modules.push(m.to_string());
+            }
         }
         if lower.ends_with("fakelib/libsceampr.sprx") {
             meta.has_ampr_runtime = true;
@@ -234,7 +362,9 @@ fn inspect_zip_contents(
                 category: IssueCategory::DumpStructure,
                 severity: ReadinessStatus::Blocked,
                 message: "param.json inside ZIP is malformed JSON.".into(),
-                remediation: "Replace param.json with a valid PS5 JSON file.".into(),
+                remediation: "Extract ZIP and replace param.json with valid JSON.".into(),
+                fix_action: FixActionKind::None,
+                fix_target_path: None,
             });
         }
     } else {
@@ -243,7 +373,9 @@ fn inspect_zip_contents(
             category: IssueCategory::DumpStructure,
             severity: ReadinessStatus::Blocked,
             message: "No param.json found inside the ZIP archive.".into(),
-            remediation: "Verify this ZIP contains an extracted PS5 game dump.".into(),
+            remediation: "Extract ZIP or inspect a valid PS5 game dump.".into(),
+            fix_action: FixActionKind::None,
+            fix_target_path: None,
         });
     }
 
@@ -256,7 +388,9 @@ fn inspect_zip_contents(
                     category: IssueCategory::AssetIntegrity,
                     severity: ReadinessStatus::Blocked,
                     message: "eboot.bin inside ZIP is NOT a valid 64-bit ELF executable.".into(),
-                    remediation: "Re-dump the game; eboot.bin is truncated, encrypted, or corrupted.".into(),
+                    remediation: "eboot.bin may still be encrypted or truncated; re-dump from PS5.".into(),
+                    fix_action: FixActionKind::None,
+                    fix_target_path: None,
                 });
             }
         }
@@ -266,13 +400,15 @@ fn inspect_zip_contents(
             code: "NO_EBOOT_BIN",
             category: IssueCategory::DumpStructure,
             severity: ReadinessStatus::Warning,
-            message: "eboot.bin not found in ZIP (Update/DLC package or incomplete dump).".into(),
+            message: "eboot.bin not found in ZIP (Update/DLC or archive subfolder).".into(),
             remediation: "Install Base Game first if this archive is Update/DLC.".into(),
+            fix_action: FixActionKind::None,
+            fix_target_path: None,
         });
         PackageKind::UpdateOrDlc
     };
 
-    evaluate_common_rules(meta, console_fw, findings);
+    evaluate_common_rules(meta, console_fw, findings, None);
     Ok(kind)
 }
 
@@ -280,6 +416,7 @@ fn evaluate_common_rules(
     meta: &GameMetadata,
     console_fw: Option<&str>,
     findings: &mut Vec<DiagnosticFinding>,
+    dump_root: Option<&Path>,
 ) {
     if meta.zero_byte_files > 0 {
         findings.push(DiagnosticFinding {
@@ -287,7 +424,9 @@ fn evaluate_common_rules(
             category: IssueCategory::AssetIntegrity,
             severity: ReadinessStatus::Warning,
             message: format!("Found {} zero-byte file(s).", meta.zero_byte_files),
-            remediation: "Check whether zero-byte files are intentional or failed downloads.".into(),
+            remediation: "Check for interrupted extraction or empty placeholder files.".into(),
+            fix_action: FixActionKind::None,
+            fix_target_path: None,
         });
     }
 
@@ -297,17 +436,30 @@ fn evaluate_common_rules(
             category: IssueCategory::FirmwareAndBackport,
             severity: ReadinessStatus::Blocked,
             message: "Packed assets (.zstd/.lz4) found, but fakelib/libSceAmpr.sprx is missing.".into(),
-            remediation: "Add libSceAmpr.sprx inside fakelib/ before running on PS5.".into(),
+            remediation: "Place libSceAmpr.sprx inside fakelib/ or unpack assets first.".into(),
+            fix_action: FixActionKind::None,
+            fix_target_path: None,
         });
     }
 
     if meta.has_fakelib {
+        let mod_summary = if meta.fakelib_modules.is_empty() {
+            "fakelib/ folder detected".to_string()
+        } else {
+            format!("fakelib/ modules: {}", meta.fakelib_modules.join(", "))
+        };
         findings.push(DiagnosticFinding {
             code: "BACKPORT_FAKELIB_ACTIVE",
             category: IssueCategory::FirmwareAndBackport,
             severity: ReadinessStatus::Warning,
-            message: "fakelib/ directory detected; ensure PRX modules match your PS5 firmware.".into(),
-            remediation: "Verify backport compatibility with your console firmware.".into(),
+            message: format!("{mod_summary}. Verify compatibility with FW {}.", console_fw.unwrap_or("current")),
+            remediation: "Keep if needed for backport, or isolate fakelib/ if it causes boot issues.".into(),
+            fix_action: if dump_root.is_some() {
+                FixActionKind::IsolateFakelib
+            } else {
+                FixActionKind::None
+            },
+            fix_target_path: dump_root.map(|p| p.join("fakelib")),
         });
     }
 
@@ -318,7 +470,9 @@ fn evaluate_common_rules(
                 category: IssueCategory::FirmwareAndBackport,
                 severity: ReadinessStatus::Blocked,
                 message: format!("Required FW ({req}) > Console FW ({cur}) without fakelib backport."),
-                remediation: "Use a backported dump or update console firmware.".into(),
+                remediation: "Use a backported dump or update PS5 firmware.".into(),
+                fix_action: FixActionKind::None,
+                fix_target_path: None,
             });
         }
     }
@@ -335,7 +489,9 @@ fn scan_directory_tree(root: &Path, meta: &mut GameMetadata, findings: &mut Vec<
                 category: IssueCategory::DumpStructure,
                 severity: ReadinessStatus::Warning,
                 message: format!("Unable to read directory: {}", dir.display()),
-                remediation: "Check folder read permissions.".into(),
+                remediation: "Check Windows folder permissions.".into(),
+                fix_action: FixActionKind::None,
+                fix_target_path: None,
             });
             continue;
         };
@@ -362,7 +518,9 @@ fn scan_directory_tree(root: &Path, meta: &mut GameMetadata, findings: &mut Vec<
                             category: IssueCategory::TargetEnvironment,
                             severity: ReadinessStatus::Warning,
                             message: format!("Case-insensitive path collision: {rel_str}"),
-                            remediation: "Rename colliding files before transferring to Windows/exFAT.".into(),
+                            remediation: "Rename conflicting files before transferring to exFAT.".into(),
+                            fix_action: FixActionKind::None,
+                            fix_target_path: None,
                         });
                     }
                     if rel_str.to_ascii_lowercase() == "fakelib/libsceampr.sprx" {
@@ -397,10 +555,12 @@ pub fn run_preflight_analysis(
             severity: ReadinessStatus::Blocked,
             message: "Source file or folder does not exist.".into(),
             remediation: "Verify the path or reconnect storage.".into(),
+            fix_action: FixActionKind::None,
+            fix_target_path: None,
         });
         return Ok(PreFlightReport {
             target_path: target.to_path_buf(),
-            detected_label: "Not Found".into(),
+            detected_label: "raw".into(),
             package_kind: PackageKind::Unknown,
             status: ReadinessStatus::Blocked,
             metadata,
@@ -419,17 +579,26 @@ pub fn run_preflight_analysis(
             code: "NO_FILE_EXTENSION",
             category: IssueCategory::FormatAndExtension,
             severity: ReadinessStatus::Warning,
-            message: format!("File has no extension; detected by magic bytes as: {detected_label}"),
-            remediation: "PS5FileDump processes it directly by real header without renaming.".into(),
+            message: format!("File has no extension; detected by header as '{detected_label}'."),
+            remediation: "Processed directly by magic header without renaming.".into(),
+            fix_action: FixActionKind::None,
+            fix_target_path: None,
         });
     }
 
     let mut package_kind = if target.is_dir() {
         scan_directory_tree(target, &mut metadata, &mut findings);
 
+        let nested_root = find_nested_dump_root(target, 3);
+        metadata.suggested_root = nested_root.clone();
+
         let param_path = target.join("param.json");
         let eboot_path = target.join("eboot.bin");
-        metadata.has_fakelib = target.join("fakelib").is_dir();
+        let fakelib_path = target.join("fakelib");
+        metadata.has_fakelib = fakelib_path.is_dir();
+        if metadata.has_fakelib {
+            metadata.fakelib_modules = collect_fakelib_modules(&fakelib_path);
+        }
 
         if param_path.is_file() {
             if let Ok(raw) = fs::read_to_string(&param_path) {
@@ -444,17 +613,36 @@ pub fn run_preflight_analysis(
                         category: IssueCategory::DumpStructure,
                         severity: ReadinessStatus::Blocked,
                         message: "param.json contains invalid JSON syntax.".into(),
-                        remediation: "Restore or fix param.json from a clean dump.".into(),
+                        remediation: "Generate a clean template param.json or restore from a valid dump.".into(),
+                        fix_action: FixActionKind::GenerateParamJson,
+                        fix_target_path: Some(param_path),
                     });
                 }
             }
         } else {
+            let (msg, rem, action, fix_path) = if let Some(ref sub) = nested_root {
+                (
+                    format!("param.json not at root; found game dump inside '{}'.", sub.display()),
+                    "Switch Source root to the detected nested game folder or generate param.json here.".into(),
+                    FixActionKind::UseSuggestedRoot,
+                    Some(sub.clone()),
+                )
+            } else {
+                (
+                    "param.json is missing from the dump root.".into(),
+                    "Generate a baseline param.json template or select the actual game folder.".into(),
+                    FixActionKind::GenerateParamJson,
+                    Some(param_path),
+                )
+            };
             findings.push(DiagnosticFinding {
                 code: "MISSING_PARAM_JSON",
                 category: IssueCategory::DumpStructure,
                 severity: ReadinessStatus::Blocked,
-                message: "param.json is missing from the dump root.".into(),
-                remediation: "A valid param.json is required for PS5 launch.".into(),
+                message: msg,
+                remediation: rem,
+                fix_action: action,
+                fix_target_path: fix_path,
             });
         }
 
@@ -464,12 +652,26 @@ pub fn run_preflight_analysis(
                 let n = ef.read(&mut hdr).unwrap_or(0);
                 metadata.eboot_valid_elf64 = validate_elf64_bytes(&hdr[..n]);
                 if !metadata.eboot_valid_elf64 {
+                    let rem = if let Some(ref sub) = nested_root {
+                        format!(
+                            "Current eboot.bin is not ELF64 (encrypted/incomplete). Nested folder '{}' also exists.",
+                            sub.display()
+                        )
+                    } else {
+                        "Current eboot.bin is not a valid 64-bit ELF executable (often encrypted or truncated). Renaming won't fix it; re-dump eboot.bin.".into()
+                    };
                     findings.push(DiagnosticFinding {
                         code: "CORRUPT_EBOOT_BIN",
                         category: IssueCategory::AssetIntegrity,
                         severity: ReadinessStatus::Blocked,
                         message: "eboot.bin header is NOT a valid 64-bit little-endian ELF executable.".into(),
-                        remediation: "Re-dump the game; eboot.bin is invalid or still encrypted.".into(),
+                        remediation: rem,
+                        fix_action: if nested_root.is_some() {
+                            FixActionKind::UseSuggestedRoot
+                        } else {
+                            FixActionKind::None
+                        },
+                        fix_target_path: nested_root.clone(),
                     });
                 }
             }
@@ -479,15 +681,21 @@ pub fn run_preflight_analysis(
                 code: "NO_EBOOT_BIN",
                 category: IssueCategory::DumpStructure,
                 severity: ReadinessStatus::Warning,
-                message: "eboot.bin not found (likely Update/DLC package, or incomplete base dump).".into(),
-                remediation: "If this is Update/DLC, ensure the matching Base Game is installed first.".into(),
+                message: "eboot.bin not found in root (Update/DLC or nested folder).".into(),
+                remediation: "Select Base Game folder or use detected nested dump path if available.".into(),
+                fix_action: if nested_root.is_some() {
+                    FixActionKind::UseSuggestedRoot
+                } else {
+                    FixActionKind::None
+                },
+                fix_target_path: nested_root,
             });
             PackageKind::UpdateOrDlc
         };
 
-        evaluate_common_rules(&metadata, console_fw, &mut findings);
+        evaluate_common_rules(&metadata, console_fw, &mut findings, Some(target));
         kind
-    } else if detected_label == "ZIP Archive" {
+    } else if detected_label == "zip" {
         inspect_zip_contents(target, console_fw, &mut metadata, &mut findings)?
     } else {
         metadata.total_files = 1;
@@ -498,7 +706,9 @@ pub fn run_preflight_analysis(
                 category: IssueCategory::AssetIntegrity,
                 severity: ReadinessStatus::Blocked,
                 message: "Input file is empty (0 bytes).".into(),
-                remediation: "Provide a non-empty game dump or archive.".into(),
+                remediation: "Select a non-empty game dump or archive.".into(),
+                fix_action: FixActionKind::None,
+                fix_target_path: None,
             });
         } else if metadata.total_bytes <= 256 * 1024 * 1024 {
             if let Ok(hex) = compute_file_sha256(target) {
@@ -515,8 +725,10 @@ pub fn run_preflight_analysis(
                 code: "INSUFFICIENT_DEST_SPACE",
                 category: IssueCategory::TargetEnvironment,
                 severity: ReadinessStatus::Blocked,
-                message: "Not enough free space at destination for safe conversion and verification.".into(),
-                remediation: "Free up disk space on the target drive.".into(),
+                message: "Not enough free space at destination for conversion and verification.".into(),
+                remediation: "Choose a destination drive with more free space.".into(),
+                fix_action: FixActionKind::None,
+                fix_target_path: None,
             });
             if package_kind == PackageKind::Unknown {
                 package_kind = PackageKind::ContainerOrArchive;
