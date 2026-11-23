@@ -151,13 +151,13 @@ fn apply_forge_dark_theme(ctx: &egui::Context) {
     visuals.window_fill = egui::Color32::from_rgb(14, 14, 21);
     visuals.extreme_bg_color = egui::Color32::from_rgb(16, 16, 23);
     visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(23, 23, 31);
-    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(12.0);
     visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(36, 36, 47);
-    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(16);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(16.0);
     visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(46, 46, 59);
-    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(16);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(16.0);
     visuals.widgets.active.bg_fill = egui::Color32::from_rgb(61, 107, 255);
-    visuals.widgets.active.corner_radius = egui::CornerRadius::same(16);
+    visuals.widgets.active.rounding = egui::Rounding::same(16.0);
     visuals.selection.bg_fill = egui::Color32::from_rgb(61, 107, 255);
 
     style.visuals = visuals;
@@ -165,24 +165,24 @@ fn apply_forge_dark_theme(ctx: &egui::Context) {
 }
 
 fn card_frame(fill: egui::Color32) -> egui::Frame {
-    egui::Frame::NONE
+    egui::Frame::none()
         .fill(fill)
-        .corner_radius(egui::CornerRadius::same(14))
+        .rounding(egui::Rounding::same(14.0))
         .inner_margin(egui::Margin::same(14.0))
 }
 
 fn bordered_card_frame(fill: egui::Color32, stroke_color: egui::Color32) -> egui::Frame {
-    egui::Frame::NONE
+    egui::Frame::none()
         .fill(fill)
         .stroke(egui::Stroke::new(1.2, stroke_color))
-        .corner_radius(egui::CornerRadius::same(14))
+        .rounding(egui::Rounding::same(14.0))
         .inner_margin(egui::Margin::same(14.0))
 }
 
 fn tile_frame() -> egui::Frame {
-    egui::Frame::NONE
+    egui::Frame::none()
         .fill(egui::Color32::from_rgb(16, 16, 23))
-        .corner_radius(egui::CornerRadius::same(10))
+        .rounding(egui::Rounding::same(10.0))
         .inner_margin(egui::Margin::same(10.0))
 }
 
